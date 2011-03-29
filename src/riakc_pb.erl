@@ -276,12 +276,7 @@ pbify_bool(true) ->
 pbify_bool(false) ->
     false;
 pbify_bool(N) when is_integer(N) ->
-    case N =:= 0 of
-        true ->
-            true;
-        false ->
-            false
-    end.
+    N =:= 0.
 
 erlify_bool(0) ->
     false;
