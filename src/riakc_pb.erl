@@ -164,31 +164,10 @@ erlify_rpbcontents(RpbContents) ->
 
 %% Convert an rpccontent pb message to an erlang {MetaData,Value} tuple
 erlify_rpbcontent(PbC) ->
-    ErlMd0 = orddict:new(),
-    case PbC#rpbcontent.content_type of
-        undefined ->
-            ErlMd1 = ErlMd0;
-        ContentType ->
-            ErlMd1 = orddict:store(?MD_CTYPE, binary_to_list(ContentType), ErlMd0)
-    end,
-    case PbC#rpbcontent.charset of
-        undefined ->
-            ErlMd2 = ErlMd1;
-        Charset ->
-            ErlMd2 = orddict:store(?MD_CHARSET, binary_to_list(Charset), ErlMd1)
-    end,
-    case PbC#rpbcontent.content_encoding of
-        undefined ->
-            ErlMd3 = ErlMd2;
-        Encoding ->
-            ErlMd3 = orddict:store(?MD_ENCODING, binary_to_list(Encoding), ErlMd2)
-    end,
-    case PbC#rpbcontent.vtag of
-        undefined ->
-            ErlMd4 = ErlMd3;
-        Vtag ->
-            ErlMd4 = orddict:store(?MD_VTAG, binary_to_list(Vtag), ErlMd3)
-    end,
+    ErlMd1 = erlify_rpbcontent_add(PbC#rpbcontent.content_type, ?MD_CTYPE, orddict:new()),
+    ErlMd2 = erlify_rpbcontent_add(PbC#rpbcontent.charset, ?MD_CHARSET, ErlMd1),
+    ErlMd3 = erlify_rpbcontent_add(PbC#rpbcontent.content_encoding, ?MD_ENCODING, ErlMd2),
+    ErlMd4 = erlify_rpbcontent_add(PbC#rpbcontent.vtag, ?MD_VTAG, ErlMd3),
     case PbC#rpbcontent.links of
         undefined ->
             ErlMd5 = ErlMd4;
@@ -217,9 +196,16 @@ erlify_rpbcontent(PbC) ->
             UserMeta = [erlify_rpbpair(E) || E <- PbUserMeta],
             ErlMd = orddict:store(?MD_USERMETA, UserMeta, ErlMd6)
     end,
-
     {dict:from_list(orddict:to_list(ErlMd)), PbC#rpbcontent.value}.
-    
+
+%% Helper to erlify_rpbcontent/1
+erlify_rpbcontent_add(Value, Key, Dict) ->
+    case Value of
+        undefined ->
+            Dict;
+        Value ->
+            orddict:store(Key, binary_to_list(Value), Dict)
+    end.
 
 %% Convert {K,V} tuple to protocol buffers
 pbify_rpbpair({K,V}) ->
