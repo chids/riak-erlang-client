@@ -164,10 +164,10 @@ erlify_rpbcontents(RpbContents) ->
 
 %% Convert an rpccontent pb message to an erlang {MetaData,Value} tuple
 erlify_rpbcontent(PbC) ->
-    ErlMd1 = erlify_rpbcontent_add(PbC#rpbcontent.content_type, ?MD_CTYPE, orddict:new()),
-    ErlMd2 = erlify_rpbcontent_add(PbC#rpbcontent.charset, ?MD_CHARSET, ErlMd1),
-    ErlMd3 = erlify_rpbcontent_add(PbC#rpbcontent.content_encoding, ?MD_ENCODING, ErlMd2),
-    ErlMd4 = erlify_rpbcontent_add(PbC#rpbcontent.vtag, ?MD_VTAG, ErlMd3),
+    ErlMd1 = erlify_rpbcontent_add(?MD_CTYPE, PbC#rpbcontent.content_type, orddict:new()),
+    ErlMd2 = erlify_rpbcontent_add(?MD_CHARSET, PbC#rpbcontent.charset, ErlMd1),
+    ErlMd3 = erlify_rpbcontent_add(?MD_ENCODING, PbC#rpbcontent.content_encoding, ErlMd2),
+    ErlMd4 = erlify_rpbcontent_add(?MD_VTAG, PbC#rpbcontent.vtag, ErlMd3),
     case PbC#rpbcontent.links of
         undefined ->
             ErlMd5 = ErlMd4;
@@ -199,13 +199,14 @@ erlify_rpbcontent(PbC) ->
     {dict:from_list(orddict:to_list(ErlMd)), PbC#rpbcontent.value}.
 
 %% Helper to erlify_rpbcontent/1
-erlify_rpbcontent_add(Value, Key, Dict) ->
+erlify_rpbcontent_add(Key, Value, Dict) when is_binary(Value) ->
     case Value of
         undefined ->
             Dict;
         Value ->
             orddict:store(Key, binary_to_list(Value), Dict)
-    end.
+    end;
+erlify_rpbcontent_add(_Key, _Value, Dict) -> Dict.
 
 %% Convert {K,V} tuple to protocol buffers
 pbify_rpbpair({K,V}) ->
@@ -285,8 +286,8 @@ to_binary(B) when is_binary(B) ->
 -ifdef(TEST).
 
 erlify_rpbcontent_add_test() ->
-    ?assertEqual(orddict:new(), erlify_rpbcontent_add(undefined, foo, orddict:new())),
-    ?assertEqual(orddict:store(foo, <<"foo">>, orddict:new()), erlify_rpbcontent_add(foo, <<"foo">>, orddict:new())).
+    ?assertEqual(orddict:new(), erlify_rpbcontent_add(foo, undefined, orddict:new())),
+    ?assertEqual(orddict:store(foo, binary_to_list(<<"foo">>), orddict:new()), erlify_rpbcontent_add(foo, <<"foo">>, orddict:new())).
 
 pb_test_() ->
     {setup, fun() ->
