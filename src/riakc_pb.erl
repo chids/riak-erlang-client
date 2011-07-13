@@ -282,6 +282,10 @@ to_binary(B) when is_binary(B) ->
 %% ===================================================================
 -ifdef(TEST).
 
+erlify_rpbcontent_add_test() ->
+    ?assertEqual(orddict:new(), erlify_rpbcontent_add(undefined, foo, orddict:new())),
+    ?assertEqual(orddict:store(foo, <<"foo">>, orddict:new()), erlify_rpbcontent_add(foo, <<"foo">>, orddict:new())).
+
 pb_test_() ->
     {setup, fun() ->
                     code:add_pathz("../ebin")
