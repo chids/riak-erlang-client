@@ -38,6 +38,8 @@
          get/3, get/4, get/5,
          put/2, put/3, put/4,
          delete/3, delete/4, delete/5,
+         delete_vclock/4, delete_vclock/5, delete_vclock/6,
+         delete_obj/2, delete_obj/3, delete_obj/4,
          list_buckets/1, list_buckets/2, list_buckets/3,
          list_keys/2, list_keys/3,
          stream_list_keys/2, stream_list_keys/3, stream_list_keys/4,
@@ -59,7 +61,7 @@
 -define(FIRST_RECONNECT_INTERVAL, 100).
 -define(MAX_RECONNECT_INTERVAL, 30000).
 
--type address() :: string() | atom() | ip_address().
+-type address() :: string() | atom() | inet:ip_address().
 -type portnum() :: non_neg_integer().
 -type option()  :: queue_if_disconnected | {queue_if_disconnected, boolean()} |
                    auto_reconnect | {auto_reconnect, boolean()}.
@@ -198,39 +200,50 @@ get(Pid, Bucket, Key) ->
 %%      Will return {error, notfound} if the key is not on the server
 -spec get(pid(), bucket() | string(), key() | string(),
           timeout() |  riak_pbc_options()) ->
-                 {ok, riakc_obj()} | {error, term()}.
+                 {ok, riakc_obj()} | {error, term() | unchanged}.
 get(Pid, Bucket, Key, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
     get(Pid, Bucket, Key, [], Timeout);
 
 %% @doc Get bucket/key from the server supplying options
 %%      [{r, 1}] would set r=1 for the request
+%%      [{if_modified, VClock}] will return unchanged if the object's vclock matches
+%%      [head] only return the object's metadata, the value is set to <<>>
+%%      [deletedvclock] return a vclock if a tombstone is encountered
 get(Pid, Bucket, Key, Options) ->
     get(Pid, Bucket, Key, Options, default_timeout(get_timeout)).
  
 %% @doc Get bucket/key from the server supplying options and timeout
 %%      [{r, 1}] would set r=1 for the request
+%%      [{if_modified, VClock}] will return unchanged if the object's vclock matches
+%%      [head] only return the object's metadata, the value is set to <<>>
+%%      [deletedvclock] return a vclock if a tombstone is encountered
 -spec get(pid(), bucket() | string(), key() | string(),
           riak_pbc_options(), timeout()) ->
-                 {ok, riakc_obj()} | {error, term()}.
+                 {ok, riakc_obj()} | {error, term() | unchanged}.
 get(Pid, Bucket, Key, Options, Timeout) ->
     Req = get_options(Options, #rpbgetreq{bucket = Bucket, key = Key}),
     gen_server:call(Pid, {req, Req, Timeout}, infinity).
 
 %% @doc Put the metadata/value in the object under bucket/key
--spec put(pid(), riakc_obj()) -> ok | {ok, riakc_obj()} | {error, term()}.
+-spec put(pid(), riakc_obj()) ->
+                 ok | {ok, riakc_obj()} | {ok, key()} | {error, term()}.
 put(Pid, Obj) ->
     put(Pid, Obj, []).
 
 %% @doc Put the metadata/value in the object under bucket/key
 -spec put(pid(), riakc_obj(), timeout() | riak_pbc_options()) ->
-                 ok | {ok, riakc_obj()} | {error, term()}.
+                 ok | {ok, riakc_obj()} | {ok, key()} | {error, term()}.
 put(Pid, Obj, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
     put(Pid, Obj, [], Timeout);
 
 %% @doc Put the metadata/value in the object under bucket/key with options
 %%      [{w,2}] sets w=2,
 %%      [{dw,1}] set dw=1,
-%%      [{return_body, true}] returns the updated metadata/value
+%%      [{pw,1}] set pw=1,
+%%      [return_body] returns the updated metadata/value
+%%      [return_head] returns the updated metadata with the values set as <<>>
+%%      [if_not_modified] the put fails unless riakc_obj and database vclocks match
+%%      [if_none_match] the put fails if the key already exist
 %%      Put throws siblings if the riakc_obj contains siblings
 %%      that have not been resolved by calling select_sibling/2 or 
 %%      update_value/2 and update_metadata/2.
@@ -240,12 +253,16 @@ put(Pid, Obj, Options) ->
 %% @doc Put the metadata/value in the object under bucket/key with options and timeout
 %%      [{w,2}] sets w=2,
 %%      [{dw,1}] set dw=1,
-%%      [{return_body, true}] returns the updated metadata/value
+%%      [{pw,1}] set pw=1,
+%%      [return_body] returns the updated metadata/value
+%%      [return_head] returns the updated metadata with the values set as <<>>
+%%      [if_not_modified] the put fails unless riakc_obj and database vclocks match
+%%      [if_none_match] the put fails if the key already exist
 %%      Put throws siblings if the riakc_obj contains siblings
 %%      that have not been resolved by calling select_sibling/2 or 
 %%      update_value/2 and update_metadata/2.
 -spec put(pid(), riakc_obj(), riak_pbc_options(), timeout()) -> 
-                 ok | {ok, riakc_obj()} | {error, term()}.
+                 ok | {ok, riakc_obj()} | {ok, key()} | {error, term()}.
 put(Pid, Obj, Options, Timeout) ->
     Content = riakc_pb:pbify_rpbcontent({riakc_obj:get_update_metadata(Obj),
                                          riakc_obj:get_update_value(Obj)}),
@@ -268,17 +285,93 @@ delete(Pid, Bucket, Key, Timeout) when is_integer(Timeout); Timeout =:= infinity
     delete(Pid, Bucket, Key, [], Timeout);
 
 %% @doc Delete the key/value with options
-%%      [{rw,2}] sets rw=2
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
 delete(Pid, Bucket, Key, Options) ->
     delete(Pid, Bucket, Key, Options, default_timeout(delete_timeout)).
 
 %% @doc Delete the key/value with options and timeout
-%%      [{rw,2}] sets rw=2
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
 -spec delete(pid(), bucket() | string(), key() | string(), 
              riak_pbc_options(), timeout()) -> ok | {error, term()}.
 delete(Pid, Bucket, Key, Options, Timeout) ->
     Req = delete_options(Options, #rpbdelreq{bucket = Bucket, key = Key}),
     gen_server:call(Pid, {req, Req, Timeout}, infinity).
+
+%% @doc Delete the key/value
+-spec delete_vclock(pid(), bucket() | string(), key() | string(), vclock:vclock()) -> ok | {error, term()}.
+delete_vclock(Pid, Bucket, Key, VClock) ->
+    delete_vclock(Pid, Bucket, Key, VClock, []).
+
+%% @doc Delete the key/value specifying timeout
+-spec delete_vclock(pid(), bucket() | string(), key() | string(), vclock:vclock(),
+             timeout() | riak_pbc_options()) -> ok | {error, term()}.
+delete_vclock(Pid, Bucket, Key, VClock, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
+    delete_vclock(Pid, Bucket, Key, VClock, [], Timeout);
+
+%% @doc Delete the key/value with options
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
+delete_vclock(Pid, Bucket, Key, VClock, Options) ->
+    delete_vclock(Pid, Bucket, Key, VClock, Options, default_timeout(delete_timeout)).
+
+%% @doc Delete the key/value with options and timeout
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
+-spec delete_vclock(pid(), bucket() | string(), key() | string(), vclock:vclock(),
+             riak_pbc_options(), timeout()) -> ok | {error, term()}.
+delete_vclock(Pid, Bucket, Key, VClock, Options, Timeout) ->
+    Req = delete_options(Options, #rpbdelreq{bucket = Bucket, key = Key,
+            vclock=VClock}),
+    gen_server:call(Pid, {req, Req, Timeout}, infinity).
+
+
+%% @doc Delete the riak object 
+-spec delete_obj(pid(), riakc_obj()) -> ok | {error, term()}.
+delete_obj(Pid, Obj) ->
+    delete_vclock(Pid, riakc_obj:bucket(Obj), riakc_obj:key(Obj),
+        riakc_obj:vclock(Obj), [], default_timeout(delete_timeout)).
+
+%% @doc Delete the riak object with options
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
+-spec delete_obj(pid(), riakc_obj(), riak_pbc_options()) -> ok | {error, term()}.
+delete_obj(Pid, Obj, Options) ->
+    delete_vclock(Pid, riakc_obj:bucket(Obj), riakc_obj:key(Obj),
+        riakc_obj:vclock(Obj), Options, default_timeout(delete_timeout)).
+
+%% @doc Delete the riak object with options and timeout
+%%      [{rw,2}] sets rw=2 - this is deprecated
+%%      [{r,1}] sets r=1
+%%      [{w,all}] sets w=all
+%%      [{pr,quorum}] sets pr=quorum
+%%      [{pw,2}] sets pw=2
+%%      [{dw,2}] sets dw=2
+-spec delete_obj(pid(), riakc_obj(), riak_pbc_options(), timeout()) -> ok | {error, term()}.
+delete_obj(Pid, Obj, Options, Timeout) ->
+    delete_vclock(Pid, riakc_obj:bucket(Obj), riakc_obj:key(Obj),
+        riakc_obj:vclock(Obj), Options, Timeout).
 
 %% @doc List all buckets on the server
 -spec list_buckets(pid()) -> {ok, [bucket()]} | {error, term()}.
@@ -679,13 +772,6 @@ handle_info({tcp, Sock, Data}, State=#state{sock = Sock, active = Active}) ->
                     cancel_req_timer(Active#request.tref),
                     send_caller(Response, NewState0#state.active),
                     NewState = dequeue_request(NewState0#state{active = undefined});
-
-                {noreply, NewState0} ->
-                    %% Request has completed with no reply needed, send the next request 
-                    %% if one is queued up
-                    cancel_req_timer(Active#request.tref),
-                    NewState = dequeue_request(NewState0#state{active = undefined});
-
                 {pending, NewState0} -> %% Request is still pending - do not queue up a new one
                     NewActive = restart_req_timer(Active),
                     NewState = NewState0#state{active = NewActive}
@@ -776,8 +862,21 @@ send_caller(Msg, #request{from = From}=Request) when From /= undefined ->
 
 get_options([], Req) ->
     Req;
+get_options([{basic_quorum, BQ} | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{basic_quorum = BQ});
+get_options([{notfound_ok, NFOk} | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{notfound_ok = NFOk});
 get_options([{r, R} | Rest], Req) ->
-    get_options(Rest, Req#rpbgetreq{r = normalize_rw_value(R)}).
+    get_options(Rest, Req#rpbgetreq{r = normalize_rw_value(R)});
+get_options([{pr, PR} | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{pr = normalize_rw_value(PR)});
+get_options([{if_modified, VClock} | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{if_modified = VClock});
+get_options([head | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{head = true});
+get_options([deletedvclock | Rest], Req) ->
+    get_options(Rest, Req#rpbgetreq{deletedvclock = true}).
+
 
 put_options([], Req) ->
     Req;
@@ -785,14 +884,32 @@ put_options([{w, W} | Rest], Req) ->
     put_options(Rest, Req#rpbputreq{w = normalize_rw_value(W)});
 put_options([{dw, DW} | Rest], Req) ->
     put_options(Rest, Req#rpbputreq{dw = normalize_rw_value(DW)});
+put_options([{pw, PW} | Rest], Req) ->
+    put_options(Rest, Req#rpbputreq{pw = normalize_rw_value(PW)});
 put_options([return_body | Rest], Req) ->
-    put_options(Rest, Req#rpbputreq{return_body = 1}).
+    put_options(Rest, Req#rpbputreq{return_body = 1});
+put_options([return_head | Rest], Req) ->
+    put_options(Rest, Req#rpbputreq{return_head = true});
+put_options([if_not_modified | Rest], Req) ->
+    put_options(Rest, Req#rpbputreq{if_not_modified = true});
+put_options([if_none_match | Rest], Req) ->
+    put_options(Rest, Req#rpbputreq{if_none_match = true}).
+
 
 delete_options([], Req) ->
     Req;
 delete_options([{rw, RW} | Rest], Req) ->
-    delete_options(Rest, Req#rpbdelreq{rw = normalize_rw_value(RW)}).
-
+    delete_options(Rest, Req#rpbdelreq{rw = normalize_rw_value(RW)});
+delete_options([{r, R} | Rest], Req) ->
+    delete_options(Rest, Req#rpbdelreq{r = normalize_rw_value(R)});
+delete_options([{w, W} | Rest], Req) ->
+    delete_options(Rest, Req#rpbdelreq{w = normalize_rw_value(W)});
+delete_options([{pr, PR} | Rest], Req) ->
+    delete_options(Rest, Req#rpbdelreq{pr = normalize_rw_value(PR)});
+delete_options([{pw, PW} | Rest], Req) ->
+    delete_options(Rest, Req#rpbdelreq{pw = normalize_rw_value(PW)});
+delete_options([{dw, DW} | Rest], Req) ->
+    delete_options(Rest, Req#rpbdelreq{dw = normalize_rw_value(DW)}).
 
 normalize_rw_value(one) -> ?RIAKC_RW_ONE;
 normalize_rw_value(quorum) -> ?RIAKC_RW_QUORUM;
@@ -808,7 +925,6 @@ normalize_rw_value(N) -> N.
 %%        pending if the request has not completed yet (streaming op)
 %% @private
 -spec process_response(#request{}, rpb_resp(), #state{}) ->
-                              {noreply, #state{}} |
                               {reply, term(), #state{}} |
                               {pending, #state{}}.
 process_response(#request{msg = rpbpingreq}, rpbpingresp, State) ->
@@ -837,6 +953,13 @@ process_response(#request{msg = rpbgetserverinforeq},
 process_response(#request{msg = #rpbgetreq{}}, rpbgetresp, State) ->
     %% server just returned the rpbgetresp code - no message was encoded
     {reply, {error, notfound}, State};
+process_response(#request{msg = #rpbgetreq{deletedvclock=true}},
+                 #rpbgetresp{vclock=VC, content=undefined}, State) ->
+    %% server returned a notfound with a vector clock, meaning a tombstone
+    {reply, {error, notfound, VC}, State};
+process_response(#request{msg = #rpbgetreq{}}, #rpbgetresp{unchanged=true}, State) ->
+    %% object was unchanged
+    {reply, unchanged, State};
 process_response(#request{msg = #rpbgetreq{bucket = Bucket, key = Key}},
                  #rpbgetresp{content = RpbContents, vclock = Vclock}, State) ->
     Contents = riakc_pb:erlify_rpbcontents(RpbContents),
@@ -846,10 +969,21 @@ process_response(#request{msg = #rpbputreq{}},
                  rpbputresp, State) ->
     %% server just returned the rpbputresp code - no message was encoded
     {reply, ok, State};
+process_response(#request{ msg = #rpbputreq{}},
+                 #rpbputresp{key = Key, content=undefined, vclock=undefined},
+                 State) when is_binary(Key) ->
+    %% server generated a key and the client didn't request return_body, but
+    %% the created key is returned
+    {reply, {ok, Key}, State};
 process_response(#request{msg = #rpbputreq{bucket = Bucket, key = Key}},
-                 #rpbputresp{content = RpbContents, vclock = Vclock}, State) ->
+                 #rpbputresp{content = RpbContents, vclock = Vclock,
+                     key = NewKey}, State) ->
     Contents = riakc_pb:erlify_rpbcontents(RpbContents),
-    {reply, {ok, riakc_obj:new_obj(Bucket, Key, Vclock, Contents)}, State};
+    ReturnKey = case NewKey of
+        undefined -> Key;
+        _ -> NewKey
+    end,
+    {reply, {ok, riakc_obj:new_obj(Bucket, ReturnKey, Vclock, Contents)}, State};
 
 process_response(#request{msg = #rpbdelreq{}},
                  rpbdelresp, State) ->
@@ -875,6 +1009,8 @@ process_response(#request{msg = #rpblistkeysreq{}}=Request,
             send_caller({keys, Keys}, Request)
     end,
     case Done of
+        true ->
+            {reply, done, State};
         1 ->
             {reply, done, State};
         _ ->
@@ -900,6 +1036,8 @@ process_response(#request{msg = #rpbmapredreq{content_type = ContentType}}=Reque
             send_caller({mapred, PhaseId, Response}, Request)
     end,
     case Done of
+        true ->
+            {reply, done, State};
         1 ->
             {reply, done, State};
         _ ->
@@ -1349,6 +1487,9 @@ pb_socket_test_() ->
              %% Grab the riakclient_pb.proto file
              code:add_pathz("../ebin"),
              ok = maybe_start_network()
+     end,
+     fun(_) ->
+             net_kernel:stop()
      end,
      {generator,
      fun() ->
@@ -1875,7 +2016,103 @@ live_node_tests() ->
                  ?assertEqual(riakc_obj:get_content_type(GotTermObj),
                               "application/x-erlang-binary"),
                  ?assertEqual(binary_to_term(riakc_obj:get_value(GotTermObj)), MyTerm)
+             end)},
+     {"putting without a key should generate one",
+         ?_test(begin
+                     reset_riak(),
+                     {ok, Pid} = start_link(test_ip(), test_port()),
+                     PO = riakc_obj:new(<<"b">>, undefined, <<"value">>),
+                     Res1 = ?MODULE:put(Pid, PO),
+                     Res2 = ?MODULE:put(Pid, PO),
+                     ?assertMatch({ok, _Key}, Res1),
+                     % Make sure the same key isn't generated twice
+                     ?assert(Res1 =/= Res2)
+             end)},
+     {"putting without a key should generate one with return_body",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, undefined, <<"value">>),
+                    {ok, Obj1} = ?MODULE:put(Pid, PO, [return_body]),
+                    {ok, Obj2} = ?MODULE:put(Pid, PO, [return_body]),
+                    %% Make sure the same key isn't generated twice
+                    ?assertEqual(element(1, Obj1), riakc_obj),
+                    ?assertEqual(element(1, Obj2), riakc_obj),
+                    ?assert(riakc_obj:key(Obj1) /= riakc_obj:key(Obj2))
+             end)},
+     {"conditional gets should return unchanged if the vclock matches",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    ?MODULE:put(Pid, PO),
+                    {ok, Obj} = ?MODULE:get(Pid, <<"b">>, <<"key">>),
+                    VClock = riakc_obj:vclock(Obj),
+                    %% object hasn't changed
+                    ?assertEqual(unchanged, ?MODULE:get(Pid, <<"b">>, <<"key">>,
+                            [{if_modified, VClock}])),
+                    %% change the object and make sure unchanged isn't returned
+                    P1 = riakc_obj:update_value(Obj, <<"newvalue">>),
+                    ?MODULE:put(Pid, P1),
+                    ?assertMatch({ok, _}, ?MODULE:get(Pid, <<"b">>, <<"key">>,
+                            [{if_modified, VClock}]))
+             end)},
+     {"the head get option should return the object metadata without the value",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    ?MODULE:put(Pid, PO),
+                    {ok, Obj} = ?MODULE:get(Pid, <<"b">>, <<"key">>, [head]),
+                    ?assertEqual(<<>>, riakc_obj:get_value(Obj)),
+                    {ok, Obj2} = ?MODULE:get(Pid, <<"b">>, <<"key">>, []),
+                    ?assertEqual(<<"value">>, riakc_obj:get_value(Obj2))
+             end)},
+     {"conditional put should allow you to avoid overwriting a value if it already exists",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    ?assertEqual(ok, ?MODULE:put(Pid, PO, [if_none_match])),
+                    ?assertEqual({error, <<"match_found">>}, ?MODULE:put(Pid, PO, [if_none_match]))
+             end)},
+     {"conditional put should allow you to avoid overwriting a value if its been updated",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    {ok, Obj} = ?MODULE:put(Pid, PO, [return_body]),
+                    Obj2 = riakc_obj:update_value(Obj, <<"newvalue">>),
+                    ?assertEqual(ok, ?MODULE:put(Pid, Obj2, [if_not_modified])),
+                    ?assertEqual({error, <<"modified">>}, ?MODULE:put(Pid, Obj2, [if_not_modified]))
+             end)},
+     {"if_not_modified should fail if the object is not found",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    ?assertEqual({error, <<"notfound">>}, ?MODULE:put(Pid, PO, [if_not_modified]))
+             end)},
+     {"return_head should empty out the value in the riak object",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    {ok, Obj} = ?MODULE:put(Pid, PO, [return_head]),
+                    ?assertEqual(<<>>, riakc_obj:get_value(Obj))
+             end)},
+     {"return_head should empty out all values when there's siblings",
+         ?_test(begin
+                    reset_riak(),
+                    {ok, Pid} = start_link(test_ip(), test_port()),
+                    ok = set_bucket(Pid, <<"b">>, [{allow_mult, true}]),
+                    PO = riakc_obj:new(<<"b">>, <<"key">>, <<"value">>),
+                    {ok, Obj} = ?MODULE:put(Pid, PO, [return_head]),
+                    ?assertEqual(<<>>, riakc_obj:get_value(Obj)),
+                    {ok, Obj2} = ?MODULE:put(Pid, PO, [return_head]),
+                    ?assertEqual([<<>>, <<>>], riakc_obj:get_values(Obj2))
              end)}
+
      ].
 
 -endif.
